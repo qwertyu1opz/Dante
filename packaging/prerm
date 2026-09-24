@@ -1,0 +1,5 @@
+#!/bin/sh
+launchctl unload /Library/LaunchDaemons/org.dante.fixerd.plist 2>/dev/null
+killall -TERM Dante 2>/dev/null
+sleep 1
+exit 0

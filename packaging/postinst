@@ -1,0 +1,9 @@
+#!/bin/sh
+PL=/Library/LaunchDaemons/org.dante.fixerd.plist
+chown root:wheel "$PL"; chmod 644 "$PL"
+chown root:wheel /usr/bin/dante-kick; chmod 4755 /usr/bin/dante-kick
+launchctl unload "$PL" 2>/dev/null
+launchctl load "$PL" 2>/dev/null
+sleep 1
+launchctl list 2>/dev/null | grep -q org.dante.fixerd || /usr/bin/dante-kick
+exit 0
