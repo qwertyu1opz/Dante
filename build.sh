@@ -17,7 +17,7 @@ FRAMEWORKS="-framework UIKit -framework Foundation -framework CoreGraphics \
             -framework SystemConfiguration -lz \
             $PROJ/Vendor/openssl/libssl.a $PROJ/Vendor/openssl/libcrypto.a"
 
-INCLUDES="-I$SRC -I$SRC/UI -I$SRC/Daemon -I$SRC/Fixer -I$SRC/Networking -I$SRC/Networking/AmneziaWG -I$SRC/Networking/Power -I$PROJ/Vendor/openssl/include"
+INCLUDES="-I$SRC -I$SRC/UI -I$SRC/Daemon -I$SRC/Fixer -I$SRC/Networking -I$SRC/Networking/AmneziaWG -I$SRC/Networking/DanteCurl -I$SRC/Networking/Power -I$PROJ/Vendor/openssl/include"
 
 CFLAGS="-arch $ARCH -isysroot $SDK -miphoneos-version-min=$MIN_VER $OPT $INCLUDES -fobjc-arc -include $SRC/DanteCompat.h"
 
@@ -45,6 +45,8 @@ $SRC/Daemon/DanteDCScanner.m
 $SRC/Fixer/DanteFixer.m
 $SRC/Fixer/DanteNetworkProbe.m
 $SRC/Networking/TLSTrustManager.m
+$SRC/Networking/DanteCurl/dcurl.c
+$SRC/Networking/DanteCurl/DanteCurl.m
 $SRC/Networking/Power/PowerVLESS.c
 $SRC/Networking/Power/PowerSHA256.c
 $SRC/Networking/Power/PowerReality.c

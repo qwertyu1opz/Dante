@@ -6,6 +6,7 @@
 #import "AWGCrypto.h"
 #import "TLSTrustManager.h"
 #import "AWGHTTPSTransport.h"
+#import "DanteCurl.h"
 #import "AmneziaWGManager.h"
 #import "DebugLog.h"
 
@@ -295,6 +296,26 @@ static NSString *tosTimestamp(void) {
             NSInteger attemptStatus = 0;
             NSString *pinned = route[@"ip"];
             uint16_t routeSocks = (uint16_t)[route[@"socks"] unsignedShortValue];
+
+            if (routeSocks > 0 && [DanteCurl isReady]) {
+                NSData *viaCurl = [DanteCurl requestURL:urlString
+                                                 method:@"POST"
+                                                headers:hdrs
+                                                   body:payload
+                                              socksPort:routeSocks
+                                              connectIP:nil
+                                                timeout:40.0
+                                             statusCode:&attemptStatus
+                                                  error:&attemptError];
+                if (viaCurl && attemptStatus >= 200 && attemptStatus < 300) {
+                    response = viaCurl;
+                    DLog(@"[AWG] registration path: %@ via dcurl (HTTP %ld)",
+                         route[@"name"], (long)attemptStatus);
+                    break;
+                }
+                DLog(@"[AWG] dcurl route failed: %@",
+                     attemptError.localizedDescription ?: [NSString stringWithFormat:@"HTTP %ld", (long)attemptStatus]);
+            }
 
             NSData *data = [AWGHTTPSTransport postToHost:reqHost
                                                connectIP:pinned.length ? pinned : nil
