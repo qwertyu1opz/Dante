@@ -9,11 +9,7 @@
 #import "AmneziaWGManager.h"
 #import "DebugLog.h"
 
-#include <spawn.h>
-#include <sys/wait.h>
 #include <unistd.h>
-
-extern char **environ;
 
 NSString * const kAWGWarpErrorDomain = @"AWGWarpRegistrar";
 
@@ -170,155 +166,6 @@ static NSString *hexSignature(NSData *data) {
     return c;
 }
 
-#pragma mark - Registration through the tunnel, via the bundled curl
-
-static NSString * const kAWGCurlPath = @"/usr/bin/vless-core-curl";
-
-+ (NSString *)caBundlePath {
-    static NSString *cached = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSArray *certs = [[NSBundle mainBundle] pathsForResourcesOfType:@"cer" inDirectory:@"Certs"];
-        if (certs.count == 0) return;
-
-        NSMutableString *pem = [NSMutableString string];
-        for (NSString *path in certs) {
-            NSData *der = [NSData dataWithContentsOfFile:path];
-            if (der.length == 0) continue;
-            NSString *b64 = [AWGCrypto base64Encode:der];
-            [pem appendString:@"-----BEGIN CERTIFICATE-----\n"];
-            NSUInteger at = 0;
-            while (at < b64.length) {
-                NSUInteger take = MIN((NSUInteger)64, b64.length - at);
-                [pem appendString:[b64 substringWithRange:NSMakeRange(at, take)]];
-                [pem appendString:@"\n"];
-                at += take;
-            }
-            [pem appendString:@"-----END CERTIFICATE-----\n"];
-        }
-
-        NSString *dest = [NSTemporaryDirectory() stringByAppendingPathComponent:@"awg-roots.pem"];
-        NSError *writeError = nil;
-        if ([pem writeToFile:dest atomically:YES encoding:NSUTF8StringEncoding error:&writeError]) {
-            cached = dest;
-            DLog(@"[AWG] built a CA bundle from %lu bundled roots at %@",
-                 (unsigned long)certs.count, dest);
-        } else {
-            DLog(@"[AWG] could not write the CA bundle: %@", writeError.localizedDescription);
-        }
-    });
-    return cached;
-}
-
-+ (BOOL)curlHelperAvailable {
-    return [[NSFileManager defaultManager] isExecutableFileAtPath:kAWGCurlPath];
-}
-
-+ (NSData *)postViaCurlThroughSOCKS:(uint16_t)socksPort
-                                url:(NSString *)urlString
-                               body:(NSData *)body
-                            headers:(NSDictionary *)headers
-                         statusCode:(NSInteger *)outStatus
-                              error:(NSError **)error {
-    if (outStatus) *outStatus = 0;
-
-    NSString *bodyString = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-    NSMutableArray *args = [NSMutableArray arrayWithObjects:
-                            kAWGCurlPath, @"-sS", @"-m", @"40",
-                            @"--socks5-hostname", [NSString stringWithFormat:@"127.0.0.1:%u", socksPort],
-                            @"-X", @"POST",
-                            @"-w", @"\n%{http_code}",
-                            @"--data-binary", bodyString ?: @"{}", nil];
-    NSString *caBundle = [self caBundlePath];
-    if (caBundle.length) {
-        [args addObject:@"--cacert"];
-        [args addObject:caBundle];
-    } else {
-        DLog(@"[AWG] no CA bundle available — refusing to skip verification for a peer key");
-        if (error) *error = [NSError errorWithDomain:kAWGWarpErrorDomain code:-33
-                                            userInfo:@{NSLocalizedDescriptionKey:
-                    @"Нет корневых сертификатов для проверки ответа"}];
-        return nil;
-    }
-    for (NSString *key in headers) {
-        [args addObject:@"-H"];
-        [args addObject:[NSString stringWithFormat:@"%@: %@", key, headers[key]]];
-    }
-    [args addObject:urlString];
-
-    char **argv = (char **)calloc(args.count + 1, sizeof(char *));
-    NSUInteger i;
-    for (i = 0; i < args.count; i++) argv[i] = strdup([args[i] UTF8String]);
-    argv[args.count] = NULL;
-
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
-        for (i = 0; i < args.count; i++) free(argv[i]);
-        free(argv);
-        if (error) *error = [NSError errorWithDomain:kAWGWarpErrorDomain code:-30
-                                            userInfo:@{NSLocalizedDescriptionKey: @"pipe() failed"}];
-        return nil;
-    }
-
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);   
-    posix_spawn_file_actions_addclose(&actions, pipefd[0]);
-
-    pid_t pid = 0;
-    int rc = posix_spawn(&pid, [kAWGCurlPath UTF8String], &actions, NULL, argv, environ);
-    posix_spawn_file_actions_destroy(&actions);
-    close(pipefd[1]);
-    for (i = 0; i < args.count; i++) free(argv[i]);
-    free(argv);
-
-    if (rc != 0) {
-        close(pipefd[0]);
-        if (error) *error = [NSError errorWithDomain:kAWGWarpErrorDomain code:rc
-                                            userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"Cannot start the TLS helper (%d)", rc]}];
-        return nil;
-    }
-
-    NSMutableData *out = [NSMutableData data];
-    uint8_t buf[4096];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) [out appendBytes:buf length:(NSUInteger)n];
-    close(pipefd[0]);
-
-    int status = 0;
-    waitpid(pid, &status, 0);
-
-    
-    NSRange lastNewline = [out rangeOfData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]
-                                   options:NSDataSearchBackwards range:NSMakeRange(0, out.length)];
-    if (lastNewline.location == NSNotFound) {
-        if (error) *error = [NSError errorWithDomain:kAWGWarpErrorDomain code:-31
-                                            userInfo:@{NSLocalizedDescriptionKey: @"Helper returned nothing"}];
-        return nil;
-    }
-    NSString *codeString = [[NSString alloc] initWithData:
-                            [out subdataWithRange:NSMakeRange(lastNewline.location + 1,
-                                                              out.length - lastNewline.location - 1)]
-                                                 encoding:NSUTF8StringEncoding];
-    NSInteger code = [codeString integerValue];
-    if (outStatus) *outStatus = code;
-
-    NSData *payload = [out subdataWithRange:NSMakeRange(0, lastNewline.location)];
-    DLog(@"[AWG] helper: HTTP %ld, %lu bytes", (long)code, (unsigned long)payload.length);
-    if (code == 0) {
-        NSString *reason = [[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding];
-        reason = [reason stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        DLog(@"[AWG] helper said: %@", reason.length ? reason : @"(nothing)");
-        if (error) *error = [NSError errorWithDomain:kAWGWarpErrorDomain code:-32
-                                            userInfo:@{NSLocalizedDescriptionKey:
-                    reason.length ? reason : @"Helper could not reach the API"}];
-        return nil;
-    }
-    return payload;
-}
-
 #pragma mark - Registration
 
 static NSString *randomInstallID(void) {
@@ -448,22 +295,6 @@ static NSString *tosTimestamp(void) {
             NSInteger attemptStatus = 0;
             NSString *pinned = route[@"ip"];
             uint16_t routeSocks = (uint16_t)[route[@"socks"] unsignedShortValue];
-
-            if (routeSocks > 0 && [AWGWarpRegistrar curlHelperAvailable]) {
-                NSData *viaHelper = [AWGWarpRegistrar postViaCurlThroughSOCKS:routeSocks
-                                                                          url:urlString
-                                                                         body:payload
-                                                                      headers:hdrs
-                                                                   statusCode:&attemptStatus
-                                                                        error:&attemptError];
-                if (viaHelper && attemptStatus >= 200 && attemptStatus < 300) {
-                    response = viaHelper;
-                    DLog(@"[AWG] registration path: %@ via the TLS helper (HTTP %ld)",
-                         route[@"name"], (long)attemptStatus);
-                    break;
-                }
-                DLog(@"[AWG] helper route failed: %@", attemptError.localizedDescription ?: @"?");
-            }
 
             NSData *data = [AWGHTTPSTransport postToHost:reqHost
                                                connectIP:pinned.length ? pinned : nil
